@@ -339,10 +339,17 @@ class ListBuilder(object):
             data = {row[key_index]: dict(zip(item_keys, row)) for row in self.data}
             json.dump(data, self.out, indent=2)
         else:
-            line_template = ""
-            for items in zip(range(len(self.col_len)), self.list_def.aligns, self.col_len):
-                line_template += "{%s:%s%d} " % items
-            self.output(line_template.format(*self.filtered(self.headers)).rstrip())
+            if self.list_def.line_format is None:
+                line_template = ""
+                for items in zip(range(len(self.col_len)), self.list_def.aligns, self.col_len):
+                    line_template += "{%s:%s%d} " % items
+            else:
+                line_template = self.list_def.line_format
+            if self.list_def.header_format is None:
+                header_format = line_template
+            else:
+                header_format = self.list_def.header_format
+            self.output(header_format.format(*self.filtered(self.headers)).rstrip())
             for row_data in self.data:
                 self.output(line_template.format(*row_data).rstrip())
 
@@ -379,7 +386,7 @@ class ListDef(object):
     }
     YES_NO = {"1": "yes", "0": "no"}
 
-    def __init__(self, inits, row_index=None, data_set=None, title=None):
+    def __init__(self, inits, row_index=None, data_set=None, title=None, line_format=None, header_format=None):
         self.headers = []
         self.keys = []
         self.xforms = []
@@ -390,6 +397,8 @@ class ListDef(object):
         self.filters = []
         self.domains = []
         self.data_set = data_set
+        self.line_format = line_format
+        self.header_format = header_format
         self.title = title
         for item in inits:
             self.keys.append(item[0])
@@ -486,6 +495,15 @@ class Hover(object):
         ("can_revert", "Reverable", ListDef.HIDE + ListDef.CENTER, {"1": "yes", "0": "no"}),
     ], row_index='id', title="DNS Entries", data_set="dns")
 
+    dns_backup_list_def = ListDef([
+        ("id", "DNS ID", ListDef.SUMMARY),
+        ("fqdn", "Domain", ListDef.SUMMARY + ListDef.DOMAIN + ListDef.FILTER),
+        ("type", "Type", ListDef.SUMMARY),
+        ("content", "Value", ListDef.SUMMARY),
+    ], row_index='id', title="# DNS Entries", data_set="dns",
+        line_format="\"${{hcmd}}\" \"${{hscript}}\" --add '{1}' {2} '{3}' # {0}",
+        header_format="#!/usr/bin/env sh\nhcmd=python\nhscript=\"{0}\"".format(os.path.abspath(__file__)))
+
     settings_list_def = ListDef([
         ("rec_num", "Num", ListDef.HIDE),
         ("name", "Name", ListDef.SUMMARY + ListDef.FILTER),
@@ -539,8 +557,10 @@ class Hover(object):
     lists = {
         "domains": domain_list_def,
         "dns": dns_list_def,
+        "backup": dns_backup_list_def,
         "settings": settings_list_def
     }
+    default_list = "domains"
 
     ipv4_re = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
     ipv6_re = re.compile(r'^(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}$')
@@ -746,7 +766,7 @@ class Hover(object):
         parser.add_argument('--refresh', '-r', action='store_true',
                             help='always refresh all domain data from server, otherwise account data is cached between invokations for up to two minutes')
 
-        parser.add_argument('--list', '-l', action='store', dest='list_name', default='domains',
+        parser.add_argument('--list', '-l', action='store', dest='list_name', default=self.default_list,
                             help='specify list to display, one of ' + ', '.join(Hover.lists.keys()))
         parser.add_argument('--domain-list', '-d', action='store_const', dest='list_name', const='domains',
                             help='output list of registered domains, same as --list domains')
@@ -754,6 +774,8 @@ class Hover(object):
                             help='output a list of dns records, same as --list dns')
         parser.add_argument('--settings-list', action='store_const', dest='list_name', const='settings',
                             help='output list of account settings, same as --list settings')
+        parser.add_argument('--backup-dns', action='store_const', dest='list_name', const='backup',
+                            help='create restore script for dns records of all or specified domains')
 
         parser.add_argument('--add-dns', '-a', action='append', nargs=3, metavar=('DOMAIN', 'TYPE', 'VALUE'),
                             help='add a dns record for the specified domain (fqdn) followed by DNS record type and value')
@@ -921,10 +943,11 @@ class Hover(object):
                 value = str(args[1]).strip()
                 self.debug("Update: id='{}' - value='{}'".format(dns_id, value))
         else:
-            if self._args.list_name in self.lists:
-                self.data_list(self.lists[self._args.list_name], list_options)
+            list_name = self._args.list_name
+            if list_name in self.lists:
+                self.data_list(self.lists[list_name], list_options)
             else:
-                self.fatal_error("Unknown list '{0}'".format(self._args.list_name))
+                self.fatal_error("Unknown list '{0}'".format(list_name))
 
         if self._args.logout:
             self._api.logout()
