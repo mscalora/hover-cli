@@ -36,6 +36,10 @@ if sys.version_info.major == 2:
     from future import standard_library
     standard_library.install_aliases()
 
+if not hasattr(logging, 'TRACE'):
+    logging.TRACE = 5
+    logging.addLevelName(logging.TRACE, "TRACE")
+
 # Enable verified HTTPS requests on older Pythons
 # http://urllib3.readthedocs.org/en/latest/security.html
 if sys.version_info[0] == 2:
