@@ -95,6 +95,7 @@ class HoverException(Exception):
 
         pass
 
+
 class HoverAPI(object):
     """hover api class with session caching
     """
@@ -240,6 +241,13 @@ class ListBuilder(object):
         self.filter = filter
         self.for_domains = for_domains
         self.max_line_len = max_line_len
+        self.filter_keys = None
+        if self.filter is not None and not callable(self.filter) and ':' in self.filter:
+            split_filter = self.filter.split(":", 1)
+            self.filter_keys = [split_filter[0]]
+            self.filter = split_filter[1] if len(split_filter) > 1 else None
+        else:
+            self.filter_keys = self.list_def.filters
 
     def get_in(self, value, subkey):
         if subkey == '':
@@ -271,11 +279,14 @@ class ListBuilder(object):
     def add_dict(self, line_data):
         if self.filter is not None:
             match = False
-            for key in self.list_def.filters:
-                val = self.get_field(line_data, key)
-                if val.find(self.filter) >= 0:
-                    match = True
-                    break
+            if callable(self.filter):
+                match = self.filter(line_data)
+            else:
+                for key in self.filter_keys:
+                    val = self.get_field(line_data, key)
+                    if val.find(self.filter) >= 0:
+                        match = True
+                        break
             if not match:
                 return
 
@@ -630,6 +641,7 @@ class Hover(object):
                 "dns": (api.apis['all_dns_records'], Hover.flatten_dns),
                 "settings": (api.apis['all_settings'], None),
             }
+            response = None
             try:
                 try:
                     response = api.call(api.methods['read'], api_map[root][0], raise_on_error=True)
@@ -637,7 +649,7 @@ class Hover(object):
                     if err2.error_code == "login":
                         userid = os.getenv('HOVER_USERNAME', None)
                         if userid is not None and os.getenv('HOVER_PASSWORD', None) is not None:
-                            login_response = api.login(os.getenv('HOVER_USERNAME', None), os.getenv('HOVER_PASSWORD', None))
+                            login_succeeded = api.login(os.getenv('HOVER_USERNAME', None), os.getenv('HOVER_PASSWORD', None))
                         else:
                             defualt_userid = userid
                             userid = prompt_for_input('Hover userid: ' if userid is None else 'Hover userid [{}]: '.format(userid)).strip()
@@ -717,8 +729,8 @@ class Hover(object):
                     "row_num": row_num,
                     "name": pivot[0],
                     "value": self.formatter.get_field(pivot[1], [], data)[0]})
-            except AttributeError as e:
-                self.logger.error(repr(pivot), e)
+            except AttributeError as e2:
+                self.logger.error(repr(pivot), e2)
         return records
 
     def data_list(self, list_def, list_options):
@@ -902,8 +914,14 @@ class Hover(object):
                 if response is None:
                     errors += 1
 
+                if self.logger.isEnabledFor(logging.TRACE):
+                    result = ["ERROR" if response is None else "SUCCESS"]
+                    message = "DNS record for {0} with type {1} and value {2}: {3}"
+                    self.trace(message.format(args + result))
+
             if errors > 0:
-                print()
+                self.logger.log(logging.ERROR, "There were {count} errors processing dns additions", count=errors)
+            self.verbose("DNS records created: {count}", count=len(self._args.add_dns)-errors)
             list_options["for_domains"] = add_domain_list
             list_options["filter"] = None
             self.purge_cache()
@@ -923,7 +941,6 @@ class Hover(object):
                 if dns_record is None:
                     self.fatal_error("dns id '{}' not found".format(dns_id))
 
-                # api.call('delete', 'dns/%s' % dns_record['id'])
                 response = self._api.call(HoverAPI.methods["delete"], self._api.apis["dns_record"].format(dns_id=dns_id))
 
                 delete_list.add_dict(dns_record)
@@ -940,8 +957,27 @@ class Hover(object):
             add_domain_list = []
             for args in self._args.update_dns:
                 dns_id = str(args[0]).strip()
-                value = str(args[1]).strip()
-                self.debug("Update: id='{}' - value='{}'".format(dns_id, value))
+                update_value = str(args[1]).strip()
+                self.debug("Update: id='{}' - value='{}'".format(dns_id, update_value))
+
+                dns_record = {"content": update_value}
+                method = HoverAPI.methods["update"]
+                path = self._api.apis["dns_record"].format(dns_id=dns_id)
+                response = self._api.call(method, path, dns_record)
+
+                if response is None:
+                    errors += 1
+
+                if self.logger.isEnabledFor(logging.TRACE):
+                    result = "ERROR" if response is None else "SUCCESS"
+                    message = "DNS record update for {} with value {}: {}"
+                    self.trace(message.format(dns_id, update_value, result))
+
+            self.purge_cache()
+            dns_ids_updated = [args[0] for args in self._args.update_dns]
+            list_options['filter'] = lambda row: row['id'] in dns_ids_updated
+            self.data_list(self.lists["dns"], list_options)
+
         else:
             list_name = self._args.list_name
             if list_name in self.lists:
