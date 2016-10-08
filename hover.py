@@ -763,6 +763,25 @@ class Hover(object):
             sys.stderr.write("ERROR: " + msg + "\n")
         raise HoverError(msg)
 
+    def resolve_fqdn(self, fqdn):
+
+        fqdn_splitter_re = re.compile(r'^(?:(.*)[.])?((?:[a-z0-9]+(?:-[a-z0-9]+)*)[.][a-z]{2,})$')
+        match = fqdn_splitter_re.match(fqdn)
+        if match is None:
+            self.fatal_error("Unable to split domain for add operation: '{}'".format(add_domain))
+        add_subdomain = match.group(1)
+        add_rootdomain = match.group(2)
+
+        domains = self.cache_data('domains')
+        if domains is None:
+            self.fatal_error("Unable to retrieve nessesary domain data for account")
+        root_domain = next((item for item in domains if item["domain_name"] == add_rootdomain), None)
+        if root_domain is None:
+            self.fatal_error("Root domain of '{}' not found in account".format(add_rootdomain))
+        domain_id = root_domain["id"]
+
+        return domain_id, add_rootdomain, add_subdomain
+
     def main(self, args, return_output=False):
 
         self.return_output = return_output
@@ -784,7 +803,7 @@ class Hover(object):
                             help='output list of registered domains, same as --list domains')
         parser.add_argument('--dns-list', '-n', action='store_const', dest='list_name', const='dns',
                             help='output a list of dns records, same as --list dns')
-        parser.add_argument('--settings-list', action='store_const', dest='list_name', const='settings',
+        parser.add_argument('--profile-list', action='store_const', dest='list_name', const='settings',
                             help='output list of account settings, same as --list settings')
         parser.add_argument('--backup-dns', action='store_const', dest='list_name', const='backup',
                             help='create restore script for dns records of all or specified domains')
@@ -795,6 +814,9 @@ class Hover(object):
                             help='update the value of a DNS record')
         parser.add_argument('--remove-dns', '--delete', action='append', nargs='+', metavar='DNS_ID',
                             help='delete a dns record with the specified name (fqdn)')
+        parser.add_argument('--set-dns', action='append', nargs=3, metavar=('DOMAIN', 'TYPE', 'VALUE'),
+                            help='set the existing dns record of the matching fqdn & type or create a new record with the specified domain (fqdn) set to the specified value,'
+                                 ' an error will be caused (no work done) if more than one record exists for the fqdn of the given type')
 
         parser.add_argument('--detail', '-t', action='store_true',
                             help='expand number of fields shown or exported')
@@ -869,6 +891,46 @@ class Hover(object):
             "max_line_len": self.get_console_size()[0] if self._args.format == 'text' and self.is_console() else None
         }
 
+        if self._args.set_dns is not None and len(self._args.set_dns) > 0:
+
+            dns_records = self.cache_data('dns')
+            multiple_matches = False
+
+            for args in self._args.set_dns:
+                match = None
+                set_fqdn = args[0].strip().lower()
+                set_type = args[1].strip().upper()
+                set_value = args[2].strip()
+
+                for dns_rec in dns_records:
+                    if dns_rec['fqdn'] == set_fqdn and dns_rec['type'] == set_type:
+                        if match is not None:
+                            if match is not True:
+                                multiple_matches = True
+                                self.error("Existing record: {id} {fqdn} {type} {content}".format(**match))
+                                match = True
+                            self.error("Existing record: {id} {fqdn} {type} {content}".format(**dns_rec))
+                        else:
+                            match = dns_rec
+
+                if match is not None:
+                    if match is not True:
+                        update_rec = [match['id'], set_value]
+                        if self._args.update_dns is None:
+                            self._args.update_dns = update_rec
+                        else:
+                            self._args.update_dns.append(update_rec)
+                        self.trace("Set for {0} {1} {2} generated update-dns operation for {3}".format(*(args + [match['id']])))
+                else:
+                    if self._args.add_dns is None:
+                        self._args.add_dns = [args]
+                    else:
+                        self._args.add_dns.append(args)
+                    self.trace("Set for {0} {1} {2} generated add-dns operation".format(*args))
+
+            if multiple_matches:
+                self.fatal_error("set-dns operation with multiple existing dns record matches")
+
         if self._args.add_dns is not None and len(self._args.add_dns) > 0:
 
             errors = 0
@@ -877,7 +939,7 @@ class Hover(object):
                 if len(args) != 3:
                     self.fatal_error("adding dns entry requires three parameters, a domain name, a record type and a record value")
 
-                add_domain = args[0].strip()
+                add_domain = args[0].strip().lower()
                 add_domain_list.append(add_domain)
                 add_type = args[1].strip().upper()
                 add_value = args[2].strip().strip()
@@ -889,22 +951,9 @@ class Hover(object):
                 if add_re.match(add_value) is None:
                     self.fatal_error(add_re_error.format(value=add_value))
 
-                fqdn_splitter_re = re.compile(r'^(?:(.*)[.])?((?:[a-z0-9]+(?:-[a-z0-9]+)*)[.][a-z]{2,})$')
-                match = fqdn_splitter_re.match(add_domain)
-                if match is None:
-                    self.fatal_error("Unable to split domain for add operation: '{}'".format(add_domain))
-                add_subdomain = match.group(1)
-                add_rootdomain = match.group(2)
+                domain_id, add_rootdomain, add_subdomain = self.resolve_fqdn(add_domain)
 
-                domains = self.cache_data('domains')
-                if domains is None:
-                    self.fatal_error("Unable to retrieve nessesary domain data for account")
-                root_domain = next((item for item in domains if item["domain_name"] == add_rootdomain), None)
-                if root_domain is None:
-                    self.fatal_error("Root domain of '{}' not found in account".format(add_rootdomain))
                 dns_record = {"name": add_subdomain, "type": add_type, "content": add_value}
-                domain_id = root_domain["id"]
-
                 method = HoverAPI.methods['create']
                 path = HoverAPI.apis['dns_records_by_domain'].format(domain=domain_id)
                 self.trace("Request: %s %s" % (method, path))
@@ -915,19 +964,18 @@ class Hover(object):
                     errors += 1
 
                 if self.logger.isEnabledFor(logging.TRACE):
-                    result = ["ERROR" if response is None else "SUCCESS"]
-                    message = "DNS record for {0} with type {1} and value {2}: {3}"
-                    self.trace(message.format(args + result))
+                    message = "DNS record for {1} with type {2} and value {3}: {0}"
+                    self.trace(message.format("ERROR" if response is None else "SUCCESS", *args))
 
             if errors > 0:
                 self.logger.log(logging.ERROR, "There were {count} errors processing dns additions", count=errors)
-            self.verbose("DNS records created: {count}", count=len(self._args.add_dns)-errors)
+            self.verbose("DNS records created: {count}".format(count=len(self._args.add_dns)-errors))
             list_options["for_domains"] = add_domain_list
             list_options["filter"] = None
             self.purge_cache()
             self.data_list(self.lists["dns"], list_options)
 
-        elif self._args.remove_dns is not None:
+        if self._args.remove_dns is not None:
 
             dns_records = self.cache_data('dns')
 
@@ -952,7 +1000,7 @@ class Hover(object):
 
             self.purge_cache()
 
-        elif self._args.update_dns is not None:
+        if self._args.update_dns is not None:
             errors = 0
             add_domain_list = []
             for args in self._args.update_dns:
@@ -978,7 +1026,11 @@ class Hover(object):
             list_options['filter'] = lambda row: row['id'] in dns_ids_updated
             self.data_list(self.lists["dns"], list_options)
 
-        else:
+        if (self._args.add_dns is None and
+                self._args.set_dns is None and
+                self._args.remove_dns is None and
+                self._args.update_dns is None):
+
             list_name = self._args.list_name
             if list_name in self.lists:
                 self.data_list(self.lists[list_name], list_options)
@@ -990,6 +1042,9 @@ class Hover(object):
             self.purge_cache()
 
         return (0, default_output.getvalue()) if return_output else 0
+
+    def error(self, *args, **kwargs):
+        self.logger.log(logging.ERROR, *args, **kwargs)
 
     def verbose(self, *args, **kwargs):
         self.logger.log(logging.INFO, *args, **kwargs)
