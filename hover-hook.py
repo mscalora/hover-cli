@@ -117,11 +117,8 @@ def create_txt_record(args):
 
     api = hover.Hover()
     try:
-        rstatus, routput = api.main(
-            ["placeholder-program-path"] +
-            extra_params +
-            ["--add", verify_fqdn, "TXT", ("' %s'" % token if token[0] == "-" else token)],
-                return_output=True)
+        params = ["--add", verify_fqdn, "TXT", ("' %s'" % token if token[0] == "-" else token)]
+        api.command(extra_params + params)
     except hover.HoverError as e:
         logger.error("Error: " + e.message)
         sys.exit(1)
@@ -145,11 +142,7 @@ def delete_txt_record(args):
 
     api = hover.Hover()
     try:
-        rstatus, routput = api.main(
-            ["placeholder-program-path"] +
-            extra_params +
-            ["--dns-list", "--output-format", "json", "--filter", delete_fqdn],
-                return_output=True)
+        rstatus, routput = api.command(extra_params + ["--dns-list", "--filter", delete_fqdn])
     except hover.HoverError as e:
         logger.error("Error: " + e.message)
         sys.exit(1)
@@ -169,11 +162,7 @@ def delete_txt_record(args):
 
     for dns_rec in data['domains']:
         if dns_rec[2] == "TXT":
-            rstatus, routput = api.main(
-                ["placeholder-program-path"] +
-                extra_params +
-                ["--delete", dns_rec[0]],
-                    return_output=True)
+            rstatus, routput = api.command(extra_params, ["--delete", dns_rec[0]])
         else:
             logger.warn("Unexpected DNS record: %s" % " ".join(dns_rec[1:]))
 

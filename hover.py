@@ -152,7 +152,7 @@ class HoverAPI(object):
         if r.content:
             self.body = r.json()
             if "succeeded" not in self.body or self.body["succeeded"] is not True:
-                if self.body["error_code"] == 'login':
+                if "error_code" in self.body and self.body["error_code"] == 'login':
                     self.authed = False
                 return False
             self.authed = True
@@ -457,6 +457,9 @@ def iso_digit(value, digit_number):
 class HoverError(Exception):
     def __init__(self, *args, **kwargs):
         Exception.__init__(self, *args, **kwargs)
+        self.message = args[0] if args is not None and len(args) > 0 else "unknown"
+        self.status_code = args[1] if args is not None and len(args) > 1 else 1
+        self.detail = args[2] if args is not None and len(args) > 2 else None
 
 
 class Hover(object):
@@ -600,12 +603,14 @@ class Hover(object):
         self.return_output = False
 
     def _cache_path(self):
+        """get cache storage path"""
         if self.storage_path is None:
             return os.path.join(os.path.expanduser("~"), ".hover-data")
         else:
             return os.path.join(os.path.realpath(self.storage_path), "hover-data")
 
-    def read_cache(self):
+    def _read_cache(self):
+        """read cache from disk"""
         self._cache = {}
         if not self._args.no_disk_cache and os.path.exists(self._cache_path()):
             with open(self._cache_path(), 'r') as f:
@@ -615,6 +620,7 @@ class Hover(object):
                     return False
 
     def _update_cache(self, cache_entry, key, data, ts, processor=None):
+        """store in cache"""
         if not data:
             return False
         self._cache[cache_entry] = data[key] if processor is None else processor(data)[key]
@@ -625,20 +631,22 @@ class Hover(object):
         return True
 
     def purge_cache(self):
+        """purge cached data"""
         self._cache = {}
         cache_path = self._cache_path()
         if os.path.exists(cache_path):
             os.remove(cache_path)
 
-    def cache_data(self, root, read_if_missing=None, max_age_min=120):
+    def _cache_data(self, root, read_if_missing=None, max_age_min=120):
+        """pull data, from cache if possible"""
         if self._cache is None:
-            self.read_cache()
+            self._read_cache()
         api = self._api
         min_since_epoch = time.time() / 60 - max_age_min
         if root not in self._cache or self._cache[root + '_ts'] < min_since_epoch:
             api_map = {
                 "domains": (api.apis['all_domains'], None),
-                "dns": (api.apis['all_dns_records'], Hover.flatten_dns),
+                "dns": (api.apis['all_dns_records'], Hover._flatten_dns),
                 "settings": (api.apis['all_settings'], None),
             }
             response = None
@@ -660,11 +668,11 @@ class Hover(object):
                         if login_succeeded:
                             response = api.call(api.methods['read'], api_map[root][0], raise_on_error=True)
                         else:
-                            self.fatal_error("Unable to authenticate on hover.com as '{userid}'".format(userid=userid))
+                            self._fatal_error("Unable to authenticate on hover.com as '{userid}'".format(userid=userid))
                     else:
                         raise err2
             except HoverException as err1:
-                self.fatal_error("Hover api request failed due to '{}'".format("unknown server error" if err1.error is None else err1.error))
+                self._fatal_error("Hover api request failed due to '{}'".format("unknown server error" if err1.error is None else err1.error))
 
             success = self._update_cache(root, root, response, min_since_epoch, processor=api_map[root][1])
 
@@ -674,11 +682,11 @@ class Hover(object):
         return self._cache[root]
 
     @staticmethod
-    def is_console():
+    def _is_console():
         return sys.stdout.isatty()
 
     @staticmethod
-    def get_console_size():
+    def _get_console_size():
         import os
         env = os.environ
 
@@ -704,7 +712,8 @@ class Hover(object):
         return int(cr[1]), int(cr[0])
 
     @staticmethod
-    def flatten_dns(data):
+    def _flatten_dns(data):
+        """flatten raw, hierarchical (by domain) dns structure to flat list"""
         flat = []
         for domain in data['domains']:
             for dns in domain['entries']:
@@ -721,7 +730,8 @@ class Hover(object):
             "succeeded": data["succeeded"]
         }
 
-    def pivot(self, data, pivots):
+    def _pivot(self, data, pivots):
+        """pivot wide & deep data to rows"""
         records = []
         for row_num, pivot in enumerate(pivots):
             try:
@@ -733,7 +743,8 @@ class Hover(object):
                 self.logger.error(repr(pivot), e2)
         return records
 
-    def data_list(self, list_def, list_options):
+    def _data_list(self, list_def, list_options):
+        """run list data generator"""
         if 'sort_key' in list_options and list_options['sort_key'] is not None:
             sort_key = list_options['sort_key']
         elif list_def.data_set == 'domains':
@@ -745,9 +756,9 @@ class Hover(object):
         else:
             sort_key = None
 
-        self.cache_data(list_def.data_set)
+        self._cache_data(list_def.data_set)
         if list_def.data_set in self.data_pivot_map:
-            data = self.pivot(self._cache[list_def.data_set], self.data_pivot_map[list_def.data_set])
+            data = self._pivot(self._cache[list_def.data_set], self.data_pivot_map[list_def.data_set])
         else:
             data = self._cache[list_def.data_set]
 
@@ -756,34 +767,45 @@ class Hover(object):
             self._list.add_dict(row)
         self._list.generate()
 
-    def fatal_error(self, msg):
+    def _fatal_error(self, msg):
+        """handle fatal error"""
         if self._args.format == 'json':
             json.dump({"error": True, "reason": msg}, self._args.out, indent=2)
         if not self.return_output:
             sys.stderr.write("ERROR: " + msg + "\n")
         raise HoverError(msg)
 
-    def resolve_fqdn(self, fqdn):
-
+    def _resolve_fqdn(self, fqdn):
+        """split fqdn and get hover domain id for root domain"""
         fqdn_splitter_re = re.compile(r'^(?:(.*)[.])?((?:[a-z0-9]+(?:-[a-z0-9]+)*)[.][a-z]{2,})$')
         match = fqdn_splitter_re.match(fqdn)
         if match is None:
-            self.fatal_error("Unable to split domain for add operation: '{}'".format(add_domain))
+            self._fatal_error("Unable to split domain for add operation: '{}'".format(add_domain))
         add_subdomain = match.group(1)
         add_rootdomain = match.group(2)
 
-        domains = self.cache_data('domains')
+        domains = self._cache_data('domains')
         if domains is None:
-            self.fatal_error("Unable to retrieve nessesary domain data for account")
+            self._fatal_error("Unable to retrieve nessesary domain data for account")
         root_domain = next((item for item in domains if item["domain_name"] == add_rootdomain), None)
         if root_domain is None:
-            self.fatal_error("Root domain of '{}' not found in account".format(add_rootdomain))
+            self._fatal_error("Root domain of '{}' not found in account".format(add_rootdomain))
         domain_id = root_domain["id"]
 
         return domain_id, add_rootdomain, add_subdomain
 
-    def main(self, args, return_output=False):
+    def command(self, args=[], throw_errors=True):
+        """entry point to drive high-level commands programmatically"""
+        result = self.main(['placeholder', '--output-format=json'] + args, return_output=True)
+        if result[0] != 0 and throw_errors:
+            raise HoverError("non-zero status", *result)
+        elif throw_errors:
+            return json.loads(result[1])
+        else:
+            return result[0], json.loads(result[1])
 
+    def main(self, args, return_output=False):
+        """normal command-line entry point"""
         self.return_output = return_output
         default_output = StringIO() if return_output else sys.stdout
 
@@ -864,7 +886,7 @@ class Hover(object):
         if self._args.storage_path is not None:
             self.storage_path = os.path.realpath(self._args.storage_path)
             if not os.access(self.storage_path, os.W_OK):
-                self.fatal_error("storage path '{}' must be writable".format(self._args.storage_path))
+                self._fatal_error("storage path '{}' must be writable".format(self._args.storage_path))
 
             Hover.logger.debug("storage path: %s" % self.storage_path)
 
@@ -888,12 +910,12 @@ class Hover(object):
             "fmt": self._args.format,
             "filter": self._args.filter,
             "for_domains": self._args.domain,
-            "max_line_len": self.get_console_size()[0] if self._args.format == 'text' and self.is_console() else None
+            "max_line_len": self._get_console_size()[0] if self._args.format == 'text' and self._is_console() else None
         }
 
         if self._args.set_dns is not None and len(self._args.set_dns) > 0:
 
-            dns_records = self.cache_data('dns')
+            dns_records = self._cache_data('dns')
             multiple_matches = False
 
             for args in self._args.set_dns:
@@ -917,7 +939,7 @@ class Hover(object):
                     if match is not True:
                         update_rec = [match['id'], set_value]
                         if self._args.update_dns is None:
-                            self._args.update_dns = update_rec
+                            self._args.update_dns = [update_rec]
                         else:
                             self._args.update_dns.append(update_rec)
                         self.trace("Set for {0} {1} {2} generated update-dns operation for {3}".format(*(args + [match['id']])))
@@ -929,7 +951,7 @@ class Hover(object):
                     self.trace("Set for {0} {1} {2} generated add-dns operation".format(*args))
 
             if multiple_matches:
-                self.fatal_error("set-dns operation with multiple existing dns record matches")
+                self._fatal_error("set-dns operation with multiple existing dns record matches")
 
         if self._args.add_dns is not None and len(self._args.add_dns) > 0:
 
@@ -937,21 +959,21 @@ class Hover(object):
             add_domain_list = []
             for args in self._args.add_dns:
                 if len(args) != 3:
-                    self.fatal_error("adding dns entry requires three parameters, a domain name, a record type and a record value")
+                    self._fatal_error("adding dns entry requires three parameters, a domain name, a record type and a record value")
 
                 add_domain = args[0].strip().lower()
                 add_domain_list.append(add_domain)
                 add_type = args[1].strip().upper()
                 add_value = args[2].strip().strip()
                 if self.fqdn_re.match(add_domain) is None:
-                    self.fatal_error("first parameter for adding a DNS entry should be a fully qualified domain name")
+                    self._fatal_error("first parameter for adding a DNS entry should be a fully qualified domain name")
                 elif add_type not in self.dns_record_validation:
-                    self.fatal_error("second parameter for adding a DNS entry should be one of " + ", ".join(HoverAPI.dns_types))
+                    self._fatal_error("second parameter for adding a DNS entry should be one of " + ", ".join(HoverAPI.dns_types))
                 add_re, add_re_error = self.dns_record_validation[add_type]
                 if add_re.match(add_value) is None:
-                    self.fatal_error(add_re_error.format(value=add_value))
+                    self._fatal_error(add_re_error.format(value=add_value))
 
-                domain_id, add_rootdomain, add_subdomain = self.resolve_fqdn(add_domain)
+                domain_id, add_rootdomain, add_subdomain = self._resolve_fqdn(add_domain)
 
                 dns_record = {"name": add_subdomain, "type": add_type, "content": add_value}
                 method = HoverAPI.methods['create']
@@ -973,11 +995,11 @@ class Hover(object):
             list_options["for_domains"] = add_domain_list
             list_options["filter"] = None
             self.purge_cache()
-            self.data_list(self.lists["dns"], list_options)
+            self._data_list(self.lists["dns"], list_options)
 
         if self._args.remove_dns is not None:
 
-            dns_records = self.cache_data('dns')
+            dns_records = self._cache_data('dns')
 
             list_options["filter"] = None
             list_options["for_domains"] = None
@@ -987,7 +1009,7 @@ class Hover(object):
             for dns_id in itertools.chain.from_iterable(self._args.remove_dns):
                 dns_record = next((item for item in dns_records if item["id"] == dns_id), None)
                 if dns_record is None:
-                    self.fatal_error("dns id '{}' not found".format(dns_id))
+                    self._fatal_error("dns id '{}' not found".format(dns_id))
 
                 response = self._api.call(HoverAPI.methods["delete"], self._api.apis["dns_record"].format(dns_id=dns_id))
 
@@ -1002,7 +1024,6 @@ class Hover(object):
 
         if self._args.update_dns is not None:
             errors = 0
-            add_domain_list = []
             for args in self._args.update_dns:
                 dns_id = str(args[0]).strip()
                 update_value = str(args[1]).strip()
@@ -1024,7 +1045,7 @@ class Hover(object):
             self.purge_cache()
             dns_ids_updated = [args[0] for args in self._args.update_dns]
             list_options['filter'] = lambda row: row['id'] in dns_ids_updated
-            self.data_list(self.lists["dns"], list_options)
+            self._data_list(self.lists["dns"], list_options)
 
         if (self._args.add_dns is None and
                 self._args.set_dns is None and
@@ -1033,9 +1054,9 @@ class Hover(object):
 
             list_name = self._args.list_name
             if list_name in self.lists:
-                self.data_list(self.lists[list_name], list_options)
+                self._data_list(self.lists[list_name], list_options)
             else:
-                self.fatal_error("Unknown list '{0}'".format(list_name))
+                self._fatal_error("Unknown list '{0}'".format(list_name))
 
         if self._args.logout:
             self._api.logout()
