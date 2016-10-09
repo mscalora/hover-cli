@@ -593,13 +593,13 @@ class Hover(object):
         "SRV": (three_num_and_fqdn_re, "SRV record values must be three numbers and a domain name separated by white space like \"10 60 5060 bigbox.example.com\""),
     }
 
-    def __init__(self):
+    def __init__(self, storage_path=None):
         self._api = None
         self._args = {}
         self._cache = None
         self._list = None
         self.formatter = string.Formatter()
-        self.storage_path = None
+        self.storage_path = storage_path
         self.return_output = False
 
     def _cache_path(self):
@@ -883,10 +883,14 @@ class Hover(object):
 
         self._args = parser.parse_args(args[1:])
 
+        # command-line overrides constructor for storage path
         if self._args.storage_path is not None:
-            self.storage_path = os.path.realpath(self._args.storage_path)
+            self.storage_path = self._args.storage_path
+
+        if self.storage_path is not None:
+            self.storage_path = os.path.realpath(self.storage_path)
             if not os.access(self.storage_path, os.W_OK):
-                self._fatal_error("storage path '{}' must be writable".format(self._args.storage_path))
+                self._fatal_error("storage path '{}' must be writable".format(self.storage_path))
 
             Hover.logger.debug("storage path: %s" % self.storage_path)
 

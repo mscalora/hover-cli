@@ -76,10 +76,10 @@ try:
 except KeyError:
     dns_servers = False
 
-extra_params = []
+storage_path = None
 
 if 'HOVER_STORAGE' in os.environ:
-    extra_params += ["--storage-path", os.environ['HOVER_STORAGE']]
+    storage_path = os.environ['HOVER_STORAGE']
 
 
 def _has_dns_propagated(name, token):
@@ -115,10 +115,10 @@ def create_txt_record(args):
 
     logger.debug("TXT record created for {0} with {1}".format(verify_fqdn, token))
 
-    api = hover.Hover()
+    api = hover.Hover(storage_path=storage_path)
     try:
-        params = ["--add", verify_fqdn, "TXT", ("' %s'" % token if token[0] == "-" else token)]
-        api.command(extra_params + params)
+        quoted_token = "' %s'" % token if token[0] == "-" else token
+        api.command(["--add", verify_fqdn, "TXT", quoted_token])
     except hover.HoverError as e:
         logger.error("Error: " + e.message)
         sys.exit(1)
@@ -140,9 +140,9 @@ def delete_txt_record(args):
         logger.info(" + http_request() error in letsencrypt.sh?")
         return
 
-    api = hover.Hover()
+    api = hover.Hover(storage_path=storage_path)
     try:
-        result = api.command(extra_params + ["--dns-list", "--filter", delete_fqdn])
+        result = api.command(["--dns-list", "--filter", delete_fqdn])
     except (hover.HoverException, hover.HoverError) as e:
         logger.error("Error: " + e.message)
         sys.exit(1)
@@ -156,7 +156,7 @@ def delete_txt_record(args):
 
     for dns_rec in result['domains']:
         if dns_rec[2] == "TXT":
-            result = api.command(extra_params + ["--delete", dns_rec[0]])
+            result = api.command(["--delete", dns_rec[0]])
         else:
             logger.warn("Unexpected DNS record: %s" % " ".join(dns_rec[1:]))
 
