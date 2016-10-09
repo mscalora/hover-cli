@@ -142,27 +142,21 @@ def delete_txt_record(args):
 
     api = hover.Hover()
     try:
-        rstatus, routput = api.command(extra_params + ["--dns-list", "--filter", delete_fqdn])
-    except hover.HoverError as e:
+        result = api.command(extra_params + ["--dns-list", "--filter", delete_fqdn])
+    except (hover.HoverException, hover.HoverError) as e:
         logger.error("Error: " + e.message)
         sys.exit(1)
 
-    try:
-        data = json.loads(routput)
-    except SyntaxError as e:
-        logger.error("Error parsing response: %s" % e.message)
+    if result is None or result is False or 'domains' not in result:
+        logger.error("Error, expecting hover util output: %s" % repr(result)[:200])
         sys.exit(1)
 
-    if not data or 'domains' not in data:
-        logger.error("Error, expecting hover util output: %s" % json_response[:100])
-        sys.exit(1)
+    if len(result['domains']) < 1:
+        logger.warn("Expected DNS TXT for %s record not found" % delete_fqdn)
 
-    if len(data['domains']) < 1:
-        logger.warn("Expected DNS record not found")
-
-    for dns_rec in data['domains']:
+    for dns_rec in result['domains']:
         if dns_rec[2] == "TXT":
-            rstatus, routput = api.command(extra_params, ["--delete", dns_rec[0]])
+            result = api.command(extra_params + ["--delete", dns_rec[0]])
         else:
             logger.warn("Unexpected DNS record: %s" % " ".join(dns_rec[1:]))
 
