@@ -1108,3 +1108,8 @@ if __name__ == "__main__":
             sys.exit(rc)
     except HoverError as e:
         pass
+
+else:
+    if not hasattr(logging, 'TRACE'):
+        logging.TRACE = 5
+        logging.addLevelName(logging.TRACE, "TRACE")
