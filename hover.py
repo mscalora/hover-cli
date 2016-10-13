@@ -344,9 +344,10 @@ class ListBuilder(object):
                 "domains": self.data
             }
             json.dump(data, self.out, indent=2)
-        elif self.format == 'mapped' or self.format == 'json-mapped':
+        elif (self.format == 'mapped' or self.format == 'json-mapped'
+                or self.format == 'native' or self.format == 'json-native'):
             key_index = 0 if self.list_def.row_index is None else self.filtered(self.keys).index(self.list_def.row_index)
-            item_keys = self.filtered(self.headers)
+            item_keys = self.filtered(self.headers if 'mapped' in self.format else self.keys)
             data = {row[key_index]: dict(zip(item_keys, row)) for row in self.data}
             json.dump(data, self.out, indent=2)
         else:
@@ -847,7 +848,10 @@ class Hover(object):
                             help='after any other operation, deauthorize the hover.com session')
 
         parser.add_argument('--output-format', '-O', action='store', dest='format', default='text',
-                            help='Choices are: text (human readable) json-flat (list of record arrays) or json-mapped (dict of records)')
+                            help='Choices are: text (human readable), '
+                                 'json-flat (list of record arrays), '
+                                 'json-mapped (dict of record dicts with report field names)'
+                                 'json-native (dict of record dicts with hover field names)')
 
         parser.add_argument('--out', '-o', type=argparse.FileType('w'), default=default_output,
                             help='output file, defaults to stdout')
