@@ -467,6 +467,20 @@ class Hover(object):
 
     logger = logging.getLogger("Hover")
 
+    option_defaults = {
+        "list": "domains",
+        "output-format": 'text',
+        "output-file": '-',
+        "storage-path": None,
+        "detail": False,
+        "logout": False,
+        "refresh": False,
+        "no-disk-cache": False,
+        "debug": False,
+        "verbose": False,
+        "trace": False,
+    }
+
     domain_list_def = ListDef([
         ("id", "Hover ID", ListDef.SUMMARY),
         ("domain_name", "Domain Name", ListDef.SUMMARY + ListDef.DOMAIN + ListDef.FILTER),
@@ -575,7 +589,6 @@ class Hover(object):
         "backup": dns_backup_list_def,
         "settings": settings_list_def
     }
-    default_list = "domains"
 
     ipv4_re = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
     ipv6_re = re.compile(r'^(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}$')
@@ -593,6 +606,8 @@ class Hover(object):
         "MX": (num_and_fqdn_re, "MX record values must be a number and domain name separated by white space like \"5 ALT1.ASPMX.L.GOOGLE.COM\""),
         "SRV": (three_num_and_fqdn_re, "SRV record values must be three numbers and a domain name separated by white space like \"10 60 5060 bigbox.example.com\""),
     }
+
+    config_defaut_name = ".hover-tool.cfg"
 
     def __init__(self, storage_path=None):
         self._api = None
@@ -805,10 +820,85 @@ class Hover(object):
         else:
             return result[0], json.loads(result[1])
 
+
+    def get_defaults(self, args, return_output):
+
+        config_defaut_file = os.path.join(os.path.expanduser("~"), Hover.config_defaut_name)
+
+        defaults = Hover.option_defaults
+        defaults["output-file"] = StringIO() if return_output else sys.stdout
+        defaults["config-file"] = config_defaut_file if os.path.isfile(config_defaut_file) else None
+
+        config_parser = argparse.ArgumentParser(add_help=False)
+        config_parser.add_argument('--config-file', '-x', action='store', default=defaults["config-file"])
+        pre_args, other_args = config_parser.parse_known_args(args)
+
+        if pre_args.config_file is not None and pre_args.config_file!='-':
+            if os.path.isfile(pre_args.config_file):
+                try:
+                    import configparser
+                except ImportError:
+                    import ConfigParser as configparser
+
+                config_string = "[hover]\n"
+                with (open(pre_args.config_file, 'r')) as conf:
+                    config_string += conf.read()
+
+                config_parser = configparser.ConfigParser()
+                config_parser.readfp(StringIO(config_string))
+
+                self.verbose("Read defaults from {0}".format(pre_args.config_file))
+
+                if 'hover' in config_parser.sections():
+                    for key, value in config_parser.items('hover'):
+                        if key in defaults:
+                            defaults[key] = value
+                            self.trace("Setting from config file: '{key}' value: '{value}'", key=key, value=str(value))
+                        else:
+                            self.warn("Unknown config file settting: '{key}' value: '{value}'".format(key=key, value=str(value)))
+            else:
+                self.error("Config file {name} not found", name=pre_args.config_file)
+
+            # for key in defaults.keys():
+            #     value = config_parser.get('hover', key)
+            #     if value is not None:
+            #         defaults[key] = value
+            #
+            #         self.verbose("Setting from config file: '{key}' value: '{vaue}'".format(key=key, value=str(value)))
+
+        if self.default_bool(defaults, 'trace', False):
+            logging.basicConfig(level=logging.TRACE)
+            self.logger.setLevel(logging.TRACE)
+        elif self.default_bool(defaults, 'debug', False):
+            logging.basicConfig(level=logging.DEBUG)
+            self.logger.setLevel(logging.DEBUG)
+        elif self.default_bool(defaults, 'info', False):
+            logging.basicConfig(level=logging.INFO)
+            self.logger.setLevel(logging.INFO)
+
+        return defaults
+
+
+    def default_bool(self, defaults, name, default_value=None):
+        if name not in defaults:
+            return default_value
+        v = str(defaults[name]).lower().strip()
+        if v in ['true', '1', 'yes']:
+            return True
+        if v in ['false', '0', 'no']:
+            return False
+        if v in ['unset', 'undefined', 'none', '-', '']:
+            return None
+        if v in ['default']:
+            return None
+        raise ValueError("Parameter '{n}' should be True, False, Unset or Default".format(n=name))
+
+
     def main(self, args, return_output=False):
         """normal command-line entry point"""
         self.return_output = return_output
-        default_output = StringIO() if return_output else sys.stdout
+
+        defaults = self.get_defaults(args, return_output)
 
         parser = argparse.ArgumentParser(
             description='Flexible Hover.com registrar account access. '
@@ -818,9 +908,10 @@ class Hover(object):
                             help='fully qualified domain name, e.g. example.com or www.example.com, '
                                  '.exmaple.com can be used to include example.com and all subdomains')
         parser.add_argument('--refresh', '-r', action='store_true',
+                            default=self.default_bool(defaults, 'refresh', False),
                             help='always refresh all domain data from server, otherwise account data is cached between invokations for up to two minutes')
 
-        parser.add_argument('--list', '-l', action='store', dest='list_name', default=self.default_list,
+        parser.add_argument('--list', '-l', action='store', dest='list_name', default=defaults["list"],
                             help='specify list to display, one of ' + ', '.join(Hover.lists.keys()))
         parser.add_argument('--domain-list', '-d', action='store_const', dest='list_name', const='domains',
                             help='output list of registered domains, same as --list domains')
@@ -842,40 +933,50 @@ class Hover(object):
                                  ' an error will be caused (no work done) if more than one record exists for the fqdn of the given type')
 
         parser.add_argument('--detail', '-t', action='store_true',
+                            default=self.default_bool(defaults, 'detail', False),
                             help='expand number of fields shown or exported')
 
         parser.add_argument('--logout', action='store_true',
+                            default=self.default_bool(defaults, 'logout', False),
                             help='after any other operation, deauthorize the hover.com session')
 
-        parser.add_argument('--output-format', '-O', action='store', dest='format', default='text',
+        parser.add_argument('--output-format', '-O', action='store', dest='format',
+                            default=defaults['output-format'],
                             help='Choices are: text (human readable), '
                                  'json-flat (list of record arrays), '
                                  'json-mapped (dict of record dicts with report field names)'
                                  'json-native (dict of record dicts with hover field names)')
 
-        parser.add_argument('--out', '-o', type=argparse.FileType('w'), default=default_output,
+        parser.add_argument('--out', '-o', type=argparse.FileType('w'), default=defaults['output-file'],
                             help='output file, defaults to stdout')
 
         parser.add_argument('--no-disk-cache', action='store_true',
+                            default=self.default_bool(defaults, 'no-disk-cache', False),
                             help='do not cache data to disk or use existing cached data')
 
         parser.add_argument('--filter', '-f', action='store',
                             help='filter names that include the specified string')
 
         parser.add_argument('--ignore-console-width', action='store_true',
+                            default=self.default_bool(defaults, 'ignore-console-width', False),
                             help='don\'t limit output to console width')
 
         parser.add_argument('--dbg-dump-list-defs', action='store_true',
                             help='dump list def info')
 
-        parser.add_argument('--storage-path', '-s', default=None, action='store',
+        parser.add_argument('--storage-path', '-s', action='store', default=defaults['storage-path'],
                             help='path where persistant data & temp data files can be stored by the tool')
+        parser.add_argument('--config-file', '-x', action='store',
+                            help='path to config file, defaults to %s in the home folder' % Hover.config_defaut_name)
 
         parser.add_argument('--trace', action='store_true',
+                            default=self.default_bool(defaults, 'trace', False),
                             help='Enable trace output, REST api logging')
         parser.add_argument('--debug', action='store_true',
+                            default=self.default_bool(defaults, 'debug', False),
                             help='Enable debug output, program execution detail')
         parser.add_argument('--verbose', action='store_true',
+                            default=self.default_bool(defaults, 'verbose', False),
                             help='Enable info output, informational detail')
 
         if Hover.logger.isEnabledFor(logging.INFO):
@@ -887,9 +988,26 @@ class Hover(object):
 
         self._args = parser.parse_args(args[1:])
 
+        if self.logger.isEnabledFor(logging.TRACE):
+            for arg_name in vars(self._args):
+                arg_value = getattr(self._args, arg_name)
+                if hasattr(arg_value, 'zfill'):
+                    self.trace("PARAM: {name} = '{val}'", name=arg_name, val=arg_value)
+                elif hasattr(arg_value, 'items') and hasattr(arg_value, '__getitem__'):
+                    for i, v in enumerate(arg_value.items()):
+                        self.trace("PARAM: {name} = [{i}] '{n}': '{v}'", name=arg_name, i=i, n=v[0], v=v[1])
+                elif hasattr(arg_value, '__getitem__'):
+                    for i, v in enumerate(arg_value):
+                        self.trace("PARAM: {name} = [{i}] '{v}'", name=arg_name, i=i, v=v)
+                else:
+                    self.trace("PARAM: {name} = {val}", name=arg_name, val=arg_value)
+
         # command-line overrides constructor for storage path
         if self._args.storage_path is not None:
             self.storage_path = self._args.storage_path
+
+        if self.storage_path is not None and self.storage_path[:1] == '~':
+            self.storage_path = os.path.expanduser(self.storage_path)
 
         if self.storage_path is not None:
             self.storage_path = os.path.realpath(self.storage_path)
@@ -1072,17 +1190,23 @@ class Hover(object):
 
         return (0, default_output.getvalue()) if return_output else 0
 
-    def error(self, *args, **kwargs):
-        self.logger.log(logging.ERROR, *args, **kwargs)
+    def _log(self, level, msg, args, kwargs):
+        return self.logger.log(level, msg.format(*args, **kwargs) if len(args) + len(kwargs) > 0 else msg)
 
-    def verbose(self, *args, **kwargs):
-        self.logger.log(logging.INFO, *args, **kwargs)
+    def error(self, msg, *args, **kwargs):
+        return self._log(logging.ERROR, msg, args, kwargs)
 
-    def debug(self, *args, **kwargs):
-        self.logger.log(logging.DEBUG, *args, **kwargs)
+    def warn(self, msg, *args, **kwargs):
+        return self._log(logging.WARNING, msg, args, kwargs)
 
-    def trace(self, *args, **kwargs):
-        self.logger.log(logging.TRACE, *args, **kwargs)
+    def verbose(self, msg, *args, **kwargs):
+        return self._log(logging.INFO, msg, args, kwargs)
+
+    def debug(self, msg, *args, **kwargs):
+        return self._log(logging.DEBUG, msg, args, kwargs)
+
+    def trace(self, msg, *args, **kwargs):
+        return self._log(logging.TRACE, msg, args, kwargs)
 
 
 if __name__ == "__main__":
