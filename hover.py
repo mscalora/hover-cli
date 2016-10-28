@@ -65,8 +65,6 @@ Hover - Commandline utility for driving Hover registrar REST API
 
         Domain List
             $ hover.py
-            Hover userid: example
-            Hover password: secret
             Hover ID   Domain Name DNS Primary   DNS Secondary
             dom9999999 example.com ns2.hover.com ns1.hover.com
 
@@ -85,11 +83,12 @@ class HoverException(Exception):
 
     logger = logging.getLogger('HoverException')
 
-    def __init__(self, response):
+    def __init__(self, response, message='unknown error'):
         self.body = response.json() if hasattr(response, 'json') else None
         self.succeeded = self.body["succeeded"] if self.body is not None and "succeeded" in self.body else None
         self.error = self.body["error"] if self.body is not None and "error" in self.body else None
         self.error_code = self.body["error_code"] if self.body is not None and "error_code" in self.body else None
+        self.message = message
 
         HoverException.logger.debug('Hover API Error ({error_code}) {error}'.format(error=self.error, error_code=self.error_code))
 
@@ -126,8 +125,8 @@ class HoverAPI(object):
         """instantiate hover api session, used cached data if specified"""
         self.hover_cookies_path = None
         if persist_cookies:
+            cookie_file_name = ".hover-api-cookies" if storage_path is None or storage_path == "~" else "hover-api-storage"
             data_path = os.path.expanduser("~") if storage_path is None or storage_path == "~" else storage_path
-            cookie_file_name = ".hover-api-cookies" if storage_path == "~" else "hover-api-storage"
             self.hover_cookies_path = os.path.join(data_path, cookie_file_name)
         self.cookies = {}
         if persist_cookies and os.path.exists(self.hover_cookies_path):
@@ -470,12 +469,14 @@ class Hover(object):
     option_defaults = {
         "list": "domains",
         "output-format": 'text',
-        "output-file": '-',
+        "output-file": '-', # sys.stdout
         "storage-path": None,
         "detail": False,
         "logout": False,
         "refresh": False,
         "no-disk-cache": False,
+        "purge-cached-data": False,
+        "offline": False,
         "debug": False,
         "verbose": False,
         "trace": False,
@@ -607,6 +608,8 @@ class Hover(object):
         "SRV": (three_num_and_fqdn_re, "SRV record values must be three numbers and a domain name separated by white space like \"10 60 5060 bigbox.example.com\""),
     }
 
+    json_format_list = ['json-flat', 'json', 'json-mapped', 'mapped', 'json-native', 'native']
+
     config_defaut_name = ".hover-tool.cfg"
 
     def __init__(self, storage_path=None):
@@ -635,10 +638,42 @@ class Hover(object):
                 except ValueError:
                     return False
 
+    def _spprint(self, any_var, name=None, level=0, indent="    ", comma=',', prefix="", arrayItem=False, indexFormat="{:d}", dictItem=False, useStr=False, whitespace=False, last=True):
+        _nl = "\n" if whitespace is False else ("" if whitespace is True else whitespace)
+        _indent = '' if whitespace else indent * level
+        _space = '' if whitespace is True else ' '
+        s = prefix
+        s += _indent + (name + (_space + ":" + _space if dictItem or arrayItem else _space + "=" + _space) if name and not (arrayItem and indexFormat == False) else "")
+        if isinstance(any_var, dict):
+            s += "{" + _nl
+            l = len(any_var)
+            for i, key in enumerate(sorted(any_var.keys())):
+                value = any_var[key]
+                s = self._spprint(value, name=key, prefix=s, indent=indent, comma=comma, level=level + 1, dictItem=True, indexFormat=indexFormat, useStr=useStr, whitespace=whitespace,
+                             last=i == l - 1)
+            s += _indent + "}" + _nl
+        elif isinstance(any_var, list):
+            s += "[" + _nl
+            l = len(any_var)
+            for i, item in enumerate(any_var):
+                s = self._spprint(item, '' if indexFormat is False else indexFormat.format(i), prefix=s, indent=indent, comma=comma, level=level + 1, arrayItem=True,
+                    indexFormat=indexFormat, useStr=useStr, whitespace=whitespace, last=i == l - 1)
+            s += _indent + "]" + _nl
+        else:
+            s += (str(any_var) if useStr else repr(any_var)) + ('' if comma is None or last else comma) + _nl
+        return s
+
+    def _dump_raw(self, key, data):
+        print("\nData: {key}".format(key=key), file=self._args.out)
+        print(self._spprint(data, indent="  "), file=self._args.out)
+        pass
+
     def _update_cache(self, cache_entry, key, data, ts, processor=None):
         """store in cache"""
         if not data:
             return False
+        if self._args.dbg_raw_dump_api_data:
+            self._dump_raw(key, data)
         self._cache[cache_entry] = data[key] if processor is None else processor(data)[key]
         self._cache[cache_entry + '_ts'] = ts
         if not self._args.no_disk_cache:
@@ -653,10 +688,12 @@ class Hover(object):
         if os.path.exists(cache_path):
             os.remove(cache_path)
 
-    def _cache_data(self, root, read_if_missing=None, max_age_min=120):
+    def _cache_data(self, root, max_age_min=120):
         """pull data, from cache if possible"""
         if self._cache is None:
             self._read_cache()
+        if self._args.offline:
+            return self._cache[root] if root in self._cache else None
         api = self._api
         min_since_epoch = time.time() / 60 - max_age_min
         if root not in self._cache or self._cache[root + '_ts'] < min_since_epoch:
@@ -671,9 +708,9 @@ class Hover(object):
                     response = api.call(api.methods['read'], api_map[root][0], raise_on_error=True)
                 except HoverException as err2:
                     if err2.error_code == "login":
-                        userid = os.getenv('HOVER_USERNAME', None)
-                        if userid is not None and os.getenv('HOVER_PASSWORD', None) is not None:
-                            login_succeeded = api.login(os.getenv('HOVER_USERNAME', None), os.getenv('HOVER_PASSWORD', None))
+                        userid = os.getenv('HOVER_TOOL_USERNAME', None)
+                        if userid is not None and os.getenv('HOVER_TOOL_PASSWORD', None) is not None:
+                            login_succeeded = api.login(os.getenv('HOVER_TOOL_USERNAME', None), os.getenv('HOVER_TOOL_PASSWORD', None))
                         else:
                             defualt_userid = userid
                             userid = prompt_for_input('Hover userid: ' if userid is None else 'Hover userid [{}]: '.format(userid)).strip()
@@ -751,10 +788,14 @@ class Hover(object):
         records = []
         for row_num, pivot in enumerate(pivots):
             try:
+                try:
+                    value = self.formatter.get_field(pivot[1], [], data)[0]
+                except KeyError:
+                    value = 'n/a'
                 records.append({
                     "row_num": row_num,
                     "name": pivot[0],
-                    "value": self.formatter.get_field(pivot[1], [], data)[0]})
+                    "value": value})
             except AttributeError as e2:
                 self.logger.error(repr(pivot), e2)
         return records
@@ -772,31 +813,35 @@ class Hover(object):
         else:
             sort_key = None
 
-        self._cache_data(list_def.data_set)
+        data = self._cache_data(list_def.data_set)
+        if data is None:
+            ext = " in cache" if self._args.offline else ""
+            raise HoverError("Required data ({set}) not available{ext}".format(set=list_def.data_set, ext=ext))
         if list_def.data_set in self.data_pivot_map:
-            data = self._pivot(self._cache[list_def.data_set], self.data_pivot_map[list_def.data_set])
-        else:
-            data = self._cache[list_def.data_set]
+            data = self._pivot(data, self.data_pivot_map[list_def.data_set])
 
         self._list = ListBuilder(list_def, **list_options)
         for row in data if sort_key is None else sorted(data, key=sort_key):
             self._list.add_dict(row)
         self._list.generate()
 
-    def _fatal_error(self, msg):
+    def _error_dict(self, message):
+        return {"error": True, "reason": message}
+
+    def _fatal_error(self, message):
         """handle fatal error"""
-        if self._args.format == 'json':
-            json.dump({"error": True, "reason": msg}, self._args.out, indent=2)
+        if self._args.format in self.json_format_list:
+            json.dump(self._error_dict(message), self._args.out, indent=2)
         if not self.return_output:
-            sys.stderr.write("ERROR: " + msg + "\n")
-        raise HoverError(msg)
+            sys.stderr.write("ERROR: " + message + "\n")
+        raise HoverError(message)
 
     def _resolve_fqdn(self, fqdn):
         """split fqdn and get hover domain id for root domain"""
         fqdn_splitter_re = re.compile(r'^(?:(.*)[.])?((?:[a-z0-9]+(?:-[a-z0-9]+)*)[.][a-z]{2,})$')
         match = fqdn_splitter_re.match(fqdn)
         if match is None:
-            self._fatal_error("Unable to split domain for add operation: '{}'".format(add_domain))
+            self._fatal_error("Unable to split domain for add operation: '{}'".format(fqdn))
         add_subdomain = match.group(1)
         add_rootdomain = match.group(2)
 
@@ -810,23 +855,15 @@ class Hover(object):
 
         return domain_id, add_rootdomain, add_subdomain
 
-    def command(self, args=[], throw_errors=True):
-        """entry point to drive high-level commands programmatically"""
-        result = self.main(['placeholder', '--output-format=json'] + args, return_output=True)
-        if result[0] != 0 and throw_errors:
-            raise HoverError("non-zero status", *result)
-        elif throw_errors:
-            return json.loads(result[1])
+    def _get_defaults(self, args):
+
+        if 'HOVER_TOOL_CONFIG' in os.environ:
+            config_defaut_file = os.environ['HOVER_TOOL_CONFIG']
         else:
-            return result[0], json.loads(result[1])
-
-
-    def get_defaults(self, args, return_output):
-
-        config_defaut_file = os.path.join(os.path.expanduser("~"), Hover.config_defaut_name)
+            config_defaut_file = os.path.join(os.path.expanduser("~"), Hover.config_defaut_name)
 
         defaults = Hover.option_defaults
-        defaults["output-file"] = StringIO() if return_output else sys.stdout
+        defaults["output-file"] = sys.stdout
         defaults["config-file"] = config_defaut_file if os.path.isfile(config_defaut_file) else None
 
         config_parser = argparse.ArgumentParser(add_help=False)
@@ -834,20 +871,21 @@ class Hover(object):
         pre_args, other_args = config_parser.parse_known_args(args)
 
         if pre_args.config_file is not None and pre_args.config_file!='-':
-            if os.path.isfile(pre_args.config_file):
+            config_file = os.path.expanduser(pre_args.config_file) if pre_args.config_file[:1] == '~' else pre_args.config_file
+            if os.path.isfile(config_file):
                 try:
                     import configparser
                 except ImportError:
                     import ConfigParser as configparser
 
                 config_string = "[hover]\n"
-                with (open(pre_args.config_file, 'r')) as conf:
+                with (open(config_file, 'r')) as conf:
                     config_string += conf.read()
 
                 config_parser = configparser.ConfigParser()
                 config_parser.readfp(StringIO(config_string))
 
-                self.verbose("Read defaults from {0}".format(pre_args.config_file))
+                self.verbose("Read defaults from {0}".format(config_file))
 
                 if 'hover' in config_parser.sections():
                     for key, value in config_parser.items('hover'):
@@ -857,29 +895,22 @@ class Hover(object):
                         else:
                             self.warn("Unknown config file settting: '{key}' value: '{value}'".format(key=key, value=str(value)))
             else:
-                self.error("Config file {name} not found", name=pre_args.config_file)
+                self.error("Config file {name} not found", name=config_file)
 
-            # for key in defaults.keys():
-            #     value = config_parser.get('hover', key)
-            #     if value is not None:
-            #         defaults[key] = value
-            #
-            #         self.verbose("Setting from config file: '{key}' value: '{vaue}'".format(key=key, value=str(value)))
-
-        if self.default_bool(defaults, 'trace', False):
+        if self._default_bool(defaults, 'trace', False):
             logging.basicConfig(level=logging.TRACE)
             self.logger.setLevel(logging.TRACE)
-        elif self.default_bool(defaults, 'debug', False):
+        elif self._default_bool(defaults, 'debug', False):
             logging.basicConfig(level=logging.DEBUG)
             self.logger.setLevel(logging.DEBUG)
-        elif self.default_bool(defaults, 'info', False):
+        elif self._default_bool(defaults, 'info', False):
             logging.basicConfig(level=logging.INFO)
             self.logger.setLevel(logging.INFO)
 
         return defaults
 
 
-    def default_bool(self, defaults, name, default_value=None):
+    def _default_bool(self, defaults, name, default_value=None):
         if name not in defaults:
             return default_value
         v = str(defaults[name]).lower().strip()
@@ -894,21 +925,66 @@ class Hover(object):
         raise ValueError("Parameter '{n}' should be True, False, Unset or Default".format(n=name))
 
 
+    def command(self, args=[], throw_errors=True):
+        """entry point to drive high-level commands programmatically"""
+        try:
+            result = self.main(['placeholder', '--output-format=json'] + args, return_output=True)
+        except HoverError as err:
+            if throw_errors:
+                raise err
+            else:
+                result = [1, json.dumps(self._error_dict(err.message))]
+        if result[0] != 0 and throw_errors:
+            raise HoverError("non-zero status", *result)
+        else:
+            if result[1] is not None and result[1].strip() != '':
+                obj = json.loads(result[1])
+            else:
+                obj = self._error_dict("Unknown failure")
+
+            if throw_errors:
+                return obj
+            else:
+                return result[0], obj
+
+
     def main(self, args, return_output=False):
         """normal command-line entry point"""
-        self.return_output = return_output
 
-        defaults = self.get_defaults(args, return_output)
+        defaults = self._get_defaults(args)
+
+        action_performed = False
 
         parser = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
             description='Flexible Hover.com registrar account access. '
             'Listing and exporting of domains, dns entries and account settings. '
-            'Creation, modification and deletion of dns entries.')
+            'Creation, modification and deletion of dns entries.\n'
+            '\nLISTS\n\n'
+            'domains - lists of domains associated with account [default]\n'
+            'dns - lists of dns entries associated with account or specified domains\n'
+            'settings - list account settings\n'
+            'backup - list of commands that would restore dns to current state\n'
+            '\nOUTPUT-FORMATS\n\n'
+            'text - human readable console output [default]\n'
+            'json-flat or json - machine readable output of list with JSON syntax, headers array and array of line arrays in js object\n'
+            'json-mapped or mapped - each record of data as map keyed by list header names in a map keyed by appropriate id (dns id, domain id, etc)\n'
+            'json-native or native - each record of data as map keyed by hover field names in a map keyed by appropriate id (dns id, domain id, etc)\n'
+            '\nENVIRONMENT-VARIABLES\n\n'
+            'HOVER_TOOL_CONFIG - path to config file, may contain ~ for home dir\n'
+            'HOVER_TOOL_USERNAME - hover.com account userid for authentication\n'
+            'HOVER_TOOL_PASSWORD - hover.com account password for authentication\n'
+            '\nSecurity Note: The password is never persisted by the tool but an active session (cookie values) are stored in a file written to the storage path (home folder by default) unless the --logout option is specified. If the default home folder is used, the file is named .hover-api-storage otherwise it is named hover-api-cookies\n'
+            '\n'
+            '\n'
+            '\n'
+            '\nNote: Using ~ in paths may produce unexpected results when used with sudo or run by a user account without home directories (i.e. www-data)'
+        )
         parser.add_argument('domain', metavar='DOMAIN', nargs='*',
                             help='fully qualified domain name, e.g. example.com or www.example.com, '
                                  '.exmaple.com can be used to include example.com and all subdomains')
         parser.add_argument('--refresh', '-r', action='store_true',
-                            default=self.default_bool(defaults, 'refresh', False),
+                            default=self._default_bool(defaults, 'refresh', False),
                             help='always refresh all domain data from server, otherwise account data is cached between invokations for up to two minutes')
 
         parser.add_argument('--list', '-l', action='store', dest='list_name', default=defaults["list"],
@@ -933,36 +1009,45 @@ class Hover(object):
                                  ' an error will be caused (no work done) if more than one record exists for the fqdn of the given type')
 
         parser.add_argument('--detail', '-t', action='store_true',
-                            default=self.default_bool(defaults, 'detail', False),
+                            default=self._default_bool(defaults, 'detail', False),
                             help='expand number of fields shown or exported')
 
         parser.add_argument('--logout', action='store_true',
-                            default=self.default_bool(defaults, 'logout', False),
+                            default=self._default_bool(defaults, 'logout', False),
                             help='after any other operation, deauthorize the hover.com session')
 
         parser.add_argument('--output-format', '-O', action='store', dest='format',
                             default=defaults['output-format'],
-                            help='Choices are: text (human readable), '
-                                 'json-flat (list of record arrays), '
-                                 'json-mapped (dict of record dicts with report field names)'
-                                 'json-native (dict of record dicts with hover field names)')
+                            help='output format see below, defaults to "text"')
 
-        parser.add_argument('--out', '-o', type=argparse.FileType('w'), default=defaults['output-file'],
-                            help='output file, defaults to stdout')
+        if not return_output:
+            parser.add_argument('--out', '-o', type=argparse.FileType('w'), default=defaults['output-file'],
+                                help='output file, defaults to stdout')
 
         parser.add_argument('--no-disk-cache', action='store_true',
-                            default=self.default_bool(defaults, 'no-disk-cache', False),
+                            default=self._default_bool(defaults, 'no-disk-cache', False),
                             help='do not cache data to disk or use existing cached data')
+        parser.add_argument('--purge-cached-data', action='store_true',
+                            default=self._default_bool(defaults, 'purge-cached-data', False),
+                            help='purge any cached hover data from this or previous invocations')
+        parser.add_argument('--offline', action='store_true',
+                            default=self._default_bool(defaults, 'offline', False),
+                            help='use cached data only, do not make any requests to server')
+        parser.add_argument('--cache-all-data', action='store_true',
+                            default=self._default_bool(defaults, 'offline', False),
+                            help='store all of the hover data in the disk cache')
 
         parser.add_argument('--filter', '-f', action='store',
                             help='filter names that include the specified string')
 
         parser.add_argument('--ignore-console-width', action='store_true',
-                            default=self.default_bool(defaults, 'ignore-console-width', False),
+                            default=self._default_bool(defaults, 'ignore-console-width', False),
                             help='don\'t limit output to console width')
 
-        parser.add_argument('--dbg-dump-list-defs', action='store_true',
+        parser.add_argument('--dbg-list-dump-defs', action='store_true',
                             help='dump list def info')
+        parser.add_argument('--dbg-raw-dump-api-data', action='store_true',
+                            help='dump raw data received from api')
 
         parser.add_argument('--storage-path', '-s', action='store', default=defaults['storage-path'],
                             help='path where persistant data & temp data files can be stored by the tool')
@@ -970,13 +1055,13 @@ class Hover(object):
                             help='path to config file, defaults to %s in the home folder' % Hover.config_defaut_name)
 
         parser.add_argument('--trace', action='store_true',
-                            default=self.default_bool(defaults, 'trace', False),
+                            default=self._default_bool(defaults, 'trace', False),
                             help='Enable trace output, REST api logging')
         parser.add_argument('--debug', action='store_true',
-                            default=self.default_bool(defaults, 'debug', False),
+                            default=self._default_bool(defaults, 'debug', False),
                             help='Enable debug output, program execution detail')
         parser.add_argument('--verbose', action='store_true',
-                            default=self.default_bool(defaults, 'verbose', False),
+                            default=self._default_bool(defaults, 'verbose', False),
                             help='Enable info output, informational detail')
 
         if Hover.logger.isEnabledFor(logging.INFO):
@@ -987,6 +1072,23 @@ class Hover(object):
             Hover.logger.info("Parameters: %s" % " ".join([shell_quote(s) for s in args[1:]]))
 
         self._args = parser.parse_args(args[1:])
+
+        if return_output:
+            self.output_buffer = StringIO()
+            setattr(self._args, 'out', self.output_buffer)
+
+        if self._args.offline and (
+                (self._args.set_dns is not None and len(self._args.set_dns) > 0) or
+                (self._args.add_dns is not None and len(self._args.add_dns) > 0) or
+                (self._args.remove_dns is not None and len(self._args.remove_dns) > 0) or
+                (self._args.update_dns is not None and len(self._args.update_dns) > 0)):
+            self._fatal_error("Offline mode cannot be used with set-dns, add-dns, remove-dns/delete or update-dns")
+
+        if self._args.cache_all_data and (self._args.offline or self._args.no_disk_cache):
+            self._fatal_error("Cache-all-data cannot be used with offline or no-disk-cache")
+
+        if self._args.refresh and self._args.offline:
+            self._fatal_error("Refresh cannot be used with offline")
 
         if self.logger.isEnabledFor(logging.TRACE):
             for arg_name in vars(self._args):
@@ -1016,9 +1118,9 @@ class Hover(object):
 
             Hover.logger.debug("storage path: %s" % self.storage_path)
 
-        self._api = HoverAPI(storage_path=self.storage_path)
+        self._api = HoverAPI(persist_cookies=not self._args.no_disk_cache, storage_path=self.storage_path)
 
-        if self._args.dbg_dump_list_defs:
+        if self._args.dbg_list_dump_defs:
             print("\ndomain_list_def", file=self.out)
             hover.domain_list_def.dump()
             print("\ndns_list_def", file=self.out)
@@ -1027,7 +1129,7 @@ class Hover(object):
             hover.settings_list_def.dump()
             return (0, '') if return_output else 0
 
-        if self._args.refresh:
+        if self._args.refresh or self._args.cache_all_data:
             self.purge_cache()
 
         list_options = {
@@ -1040,7 +1142,7 @@ class Hover(object):
         }
 
         if self._args.set_dns is not None and len(self._args.set_dns) > 0:
-
+            action_performed = True
             dns_records = self._cache_data('dns')
             multiple_matches = False
 
@@ -1080,7 +1182,7 @@ class Hover(object):
                 self._fatal_error("set-dns operation with multiple existing dns record matches")
 
         if self._args.add_dns is not None and len(self._args.add_dns) > 0:
-
+            action_performed = True
             errors = 0
             add_domain_list = []
             for args in self._args.add_dns:
@@ -1124,7 +1226,7 @@ class Hover(object):
             self._data_list(self.lists["dns"], list_options)
 
         if self._args.remove_dns is not None:
-
+            action_performed = True
             dns_records = self._cache_data('dns')
 
             list_options["filter"] = None
@@ -1149,6 +1251,7 @@ class Hover(object):
             self.purge_cache()
 
         if self._args.update_dns is not None:
+            action_performed = True
             errors = 0
             for args in self._args.update_dns:
                 dns_id = str(args[0]).strip()
@@ -1173,22 +1276,34 @@ class Hover(object):
             list_options['filter'] = lambda row: row['id'] in dns_ids_updated
             self._data_list(self.lists["dns"], list_options)
 
-        if (self._args.add_dns is None and
-                self._args.set_dns is None and
-                self._args.remove_dns is None and
-                self._args.update_dns is None):
+        if self._args.cache_all_data:
+            dns_records = self._cache_data('dns')
+            domain_records = self._cache_data('domains')
+            settings_records = self._cache_data('settings')
 
+        action_pending = (
+            self._args.logout or
+            self._args.no_disk_cache or
+            self._args.purge_cached_data or
+            self._args.cache_all_data)
+
+        if not action_performed and not action_pending:
             list_name = self._args.list_name
             if list_name in self.lists:
-                self._data_list(self.lists[list_name], list_options)
+                try:
+                    self._data_list(self.lists[list_name], list_options)
+                except HoverError as he:
+                    self._fatal_error(he.message)
             else:
                 self._fatal_error("Unknown list '{0}'".format(list_name))
 
-        if self._args.logout:
+        if self._args.logout or self._args.no_disk_cache:
             self._api.logout()
+
+        if self._args.purge_cached_data:
             self.purge_cache()
 
-        return (0, default_output.getvalue()) if return_output else 0
+        return (0, self.output_buffer.getvalue()) if return_output else 0
 
     def _log(self, level, msg, args, kwargs):
         return self.logger.log(level, msg.format(*args, **kwargs) if len(args) + len(kwargs) > 0 else msg)
