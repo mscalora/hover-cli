@@ -8,6 +8,8 @@ import codecs
 import tempfile
 import shutil
 
+# test commit
+
 class TestHover(TestCase):
     @classmethod
     def setUpClass(cls):
