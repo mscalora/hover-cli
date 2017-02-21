@@ -183,8 +183,10 @@ def main(argv):
     }
     logger.info(" + Hover hook executing: {0}".format(argv[0]))
     logger.info(" + Hover hook executing with: {0}".format(" ".join(argv[1:])))
-    ops[argv[0]](argv[1:])
-
+    if argv[0] in ops:
+        ops[argv[0]](argv[1:])
+    else:
+        logger.info(" + Unsupported operation: {0}".format(argv[0]))
 
 if __name__ == '__main__':
     main(sys.argv[1:])
