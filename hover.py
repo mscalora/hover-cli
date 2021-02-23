@@ -178,7 +178,7 @@ class HoverAPI(object):
             else:
                 return False
         HoverAPI.logger.info("login attempt for %s", params["username"])
-        response = requests.post("https://www.hover.com/api/login", params=params, cookies=self.cookies)
+        response = requests.post("https://www.hover.com/api/login", data=params, cookies=self.cookies)
         if not response.ok:
             if raise_on_error:
                 raise HoverException(response)
